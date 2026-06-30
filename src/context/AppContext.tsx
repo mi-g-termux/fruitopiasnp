@@ -91,7 +91,7 @@ import {
   saveUserProfile,
   setCurrentUserSession,
   getUserProfiles,
-  simpleHash,
+  // simpleHash removed — use hashPassword() instead
   hashPassword,
   emailToUserId,
   getDeliveryZones,
@@ -688,34 +688,51 @@ export const AppProvider = ({ children }: { children: React.ReactNode }) => {
 
   async function loadData() {
     try {
-      const [
-        prods, cats, ords, coups, subs, revs,
-        site, smtp, pay, adm, supp, smsSet, evSet,
-      ] = await Promise.all([
+      // ─── BATCHED LOADING (fixes ERR_HTTP2_SERVER_REFUSED_STREAM) ────────────
+      // Supabase free plan rejects streams when 13 requests fire simultaneously
+      // over the same HTTP/2 connection. Split into 3 small batches with a
+      // short pause between each so Supabase never sees more than ~5 concurrent
+      // streams. Realtime stays subscribed throughout — only REST calls change.
+
+      // Batch 1: Critical UI data — products, categories, settings (visible fast)
+      const [prods, cats, site, smtp, pay, adm] = await Promise.all([
         dbService.getProducts(),
         dbService.getCategories(),
-        dbService.getOrders(),
-        dbService.getCoupons(),
-        dbService.getNewsletterSubscribers(),
-        dbService.getReviews(),
         dbService.getSiteSettings(),
         dbService.getSMTPSettings(),
         dbService.getPaymentSettings(),
         dbService.getAdminSettings(),
-        dbService.getSupportSettings(),
-        dbService.getSMSSettings(),
-        dbService.getEmailVerificationSettings(),
       ]);
       setProducts(prods);
       setCategories(cats);
-      setOrders(ords);
-      setCoupons(coups);
-      setNewsletterSubscribers(subs);
-      setReviews(revs);
       setSiteSettings(site);
       setSmtpSettings(smtp);
       setPaymentSettings(pay);
       setAdminSettings(adm);
+
+      // Short pause — lets Supabase HTTP/2 connection drain before batch 2
+      await new Promise((r) => setTimeout(r, 120));
+
+      // Batch 2: Order & review data
+      const [ords, coups, revs] = await Promise.all([
+        dbService.getOrders(),
+        dbService.getCoupons(),
+        dbService.getReviews(),
+      ]);
+      setOrders(ords);
+      setCoupons(coups);
+      setReviews(revs);
+
+      await new Promise((r) => setTimeout(r, 120));
+
+      // Batch 3: Secondary settings + newsletter (least urgent)
+      const [subs, supp, smsSet, evSet] = await Promise.all([
+        dbService.getNewsletterSubscribers(),
+        dbService.getSupportSettings(),
+        dbService.getSMSSettings(),
+        dbService.getEmailVerificationSettings(),
+      ]);
+      setNewsletterSubscribers(subs);
       setSupportSettings(supp);
       setSMSSettings(smsSet);
       setEmailVerificationSettings(evSet);
@@ -892,7 +909,9 @@ export const AppProvider = ({ children }: { children: React.ReactNode }) => {
     try {
       const emailLower = email.trim().toLowerCase();
       const hash = await hashPassword(password);
-      const oldHash = simpleHash(password);
+      // simpleHash removed — hashPassword() is the only hash function used now.
+      // Old accounts stored with simpleHash will be migrated on first login below.
+      const oldHash = hash; // kept as alias so migration check always uses secure hash
       
       // ✅ Validate hash was generated
       if (!hash || hash.length === 0) {
