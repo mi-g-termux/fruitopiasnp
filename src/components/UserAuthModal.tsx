@@ -97,13 +97,17 @@ interface UserAuthModalProps {
   isOpen: boolean;
   onClose: () => void;
   defaultTab?: 'signin' | 'signup';
+  /** Open directly on the forgot-password tab (e.g. from guest email link). */
+  defaultView?: 'forgot';
+  /** Pre-fill the forgot-password email field. */
+  defaultEmail?: string;
 }
 
-export const UserAuthModal = ({ isOpen, onClose, defaultTab = 'signin' }: UserAuthModalProps) => {
+export const UserAuthModal = ({ isOpen, onClose, defaultTab = 'signin', defaultView, defaultEmail }: UserAuthModalProps) => {
   const { loginUser, loginWithGoogle, registerUser, resetUserPassword, sendPasswordOtp, verifyPasswordOtp, sendRegistrationOtp, verifyRegistrationOtp, userProfile, logoutUser, isUserLoggedIn, updateUserProfile, adminSettings, orders, siteSettings, updateOrderStatus, smtpSettings, emailVerificationSettings, checkPhoneAvailability } = useApp();
   const toast = useToast();
-  const [tab, setTab] = useState<'signin' | 'signup' | 'profile' | 'forgot'>(isUserLoggedIn ? 'profile' : defaultTab);
-  const [fpEmail, setFpEmail] = useState('');
+  const [tab, setTab] = useState<'signin' | 'signup' | 'profile' | 'forgot'>(isUserLoggedIn ? 'profile' : (defaultView === 'forgot' ? 'forgot' : defaultTab));
+  const [fpEmail, setFpEmail] = useState(defaultEmail || '');
   const [fpOtp, setFpOtp] = useState('');
   const [fpNewPass, setFpNewPass] = useState('');
   const [fpConfPass, setFpConfPass] = useState('');
@@ -118,6 +122,17 @@ export const UserAuthModal = ({ isOpen, onClose, defaultTab = 'signin' }: UserAu
   const [resendCountdown, setResendCountdown] = useState(0);
   const [wrongOtpAttempts, setWrongOtpAttempts] = useState(0);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Deep-link: when modal opens with defaultView='forgot' (guest "Set My Password" link),
+  // jump straight to the forgot-password tab and pre-fill the email.
+  useEffect(() => {
+    if (isOpen && defaultView === 'forgot') {
+      setTab('forgot');
+      setFpStep('email');
+      if (defaultEmail) setFpEmail(defaultEmail);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, defaultView, defaultEmail]);
 
   // Registration OTP step: after filling form, user verifies email via OTP before account is created
   const [regStep, setRegStep] = useState<'form' | 'otp'>('form');

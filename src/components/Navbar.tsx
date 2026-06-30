@@ -28,10 +28,28 @@ export const Navbar = ({
   const { siteSettings, cart, isAdminLoggedIn, isUserLoggedIn, userProfile, products, formatPrice } = useApp();
   const [searchOpen, setSearchOpen] = useState(false);
   const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [authInitialView, setAuthInitialView] = useState<'forgot' | undefined>(undefined);
+  const [authInitialEmail, setAuthInitialEmail] = useState('');
   const [authTab, setAuthTab] = useState<'signin' | 'signup'>('signin');
   const [searchDropdownOpen, setSearchDropdownOpen] = useState(false);
   const searchWrapperRef = useRef<HTMLDivElement>(null);
   const mobileSearchWrapperRef = useRef<HTMLDivElement>(null);
+
+  // Deep-link handler: guest clicks "Set My Password" in their welcome email.
+  // URL: /?action=forgot-password&email=user%40example.com
+  // Opens the auth modal directly on the forgot-password tab with email pre-filled.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const action = params.get('action');
+    const email  = params.get('email');
+    if (action === 'forgot-password') {
+      setAuthInitialView('forgot');
+      setAuthInitialEmail(email || '');
+      setAuthModalOpen(true);
+      // Clean the URL so refreshing doesn't re-open the modal
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, []);
   const toast = useToast();
 
   // Filter products for dropdown
@@ -292,7 +310,18 @@ export const Navbar = ({
         </div>
       </nav>
 
-      <UserAuthModal isOpen={authModalOpen} onClose={() => setAuthModalOpen(false)} defaultTab={authTab} />
+      <UserAuthModal
+        isOpen={authModalOpen}
+        onClose={() => {
+          setAuthModalOpen(false);
+          // Reset deep-link state so normal Sign In / Sign Up clicks work normally
+          setAuthInitialView(undefined);
+          setAuthInitialEmail('');
+        }}
+        defaultTab={authTab}
+        defaultView={authInitialView}
+        defaultEmail={authInitialEmail}
+      />
     </>
   );
 };
