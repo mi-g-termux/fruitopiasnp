@@ -1,459 +1,373 @@
-// api/payment.ts
-// ─────────────────────────────────────────────────────────────────────────────
-// SINGLE Vercel Serverless Function: routes ALL payment-gateway traffic.
-// Fixes: Vercel-safe static imports, comprehensive error logging, edge-case handling.
-// ─────────────────────────────────────────────────────────────────────────────
-
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import crypto from 'crypto';
 
-// ── Static imports (no dynamic import() — more reliable on Vercel) ──────────
-import bkashCreate from '../lib/payments/bkash/create-payment';
-import bkashExecute from '../lib/payments/bkash/execute-payment';
-import nagadCreate from '../lib/payments/nagad/create-payment';
-import nagadVerify from '../lib/payments/nagad/verify-payment';
-import sslcommerzCreate from '../lib/payments/sslcommerz/create-payment';
-import sslcommerzIpn from '../lib/payments/sslcommerz/ipn';
-import razorpayCreate from '../lib/payments/razorpay/create-order';
-import razorpayVerify from '../lib/payments/razorpay/verify-payment';
-import paypalCreate from '../lib/payments/paypal/create-order';
-import paypalCapture from '../lib/payments/paypal/capture-order';
-import paypalCallback from '../lib/payments/paypal/callback';
-import stripeCreate from '../lib/payments/stripe/create-payment-intent';
-import stripeConfirm from '../lib/payments/stripe/confirm-payment';
-import stripeCheckoutSession from '../lib/payments/stripe/create-checkout-session';
-import paytmInitiate from '../lib/payments/paytm/initiate';
-import paytmCallback from '../lib/payments/paytm/callback';
-import upiCreateIntent from '../lib/payments/upi/create-intent';
-import jazzcashInitiate from '../lib/payments/jazzcash/initiate';
-import jazzcashCallback from '../lib/payments/jazzcash/callback';
-import easypaisaInitiate from '../lib/payments/easypaisa/initiate';
-import easypaisaCallback from '../lib/payments/easypaisa/callback';
-import payfastInitiate from '../lib/payments/payfast/initiate';
-import payfastCallback from '../lib/payments/payfast/callback';
-import payfastIpn from '../lib/payments/payfast/ipn';
-
-// ── Route map: no lazy loading, direct function references ──────────────────
-type Handler = (req: VercelRequest, res: VercelResponse) => unknown;
-const ROUTE_MAP: Record<string, Record<string, Handler>> = {
-  bkash: {
-    'create-payment':  bkashCreate,
-    'execute-payment': bkashExecute,
-  },
-  nagad: {
-    'create-payment': nagadCreate,
-    'verify-payment': nagadVerify,
-  },
-  sslcommerz: {
-    'create-payment': sslcommerzCreate,
-    'ipn':            sslcommerzIpn,
-  },
-  razorpay: {
-    'create-order':   razorpayCreate,
-    'verify-payment': razorpayVerify,
-  },
-  paypal: {
-    'create-order':   paypalCreate,
-    'capture-order':  paypalCapture,
-    'callback':       paypalCallback,
-  },
-  stripe: {
-    'create-payment-intent':   stripeCreate,
-    'confirm-payment':         stripeConfirm,
-    'create-checkout-session': stripeCheckoutSession,
-  },
-  paytm: {
-    'initiate': paytmInitiate,
-    'callback': paytmCallback,
-  },
-  upi: {
-    'create-intent': upiCreateIntent,
-  },
-  jazzcash: {
-    'initiate': jazzcashInitiate,
-    'callback': jazzcashCallback,
-  },
-  easypaisa: {
-    'initiate': easypaisaInitiate,
-    'callback': easypaisaCallback,
-  },
-  payfast: {
-    'initiate': payfastInitiate,
-    'callback': payfastCallback,
-    'ipn':      payfastIpn,
-  },
-};
-
-// ── Main router ──────────────────────────────────────────────────────────────
-export default async function handler(
-  req: VercelRequest,
-  res: VercelResponse,
-): Promise<void> {
-  const requestId = Math.random().toString(36).slice(2, 8);
-  const startTime = Date.now();
-
-  try {
-    // CORS pre-flight
-    if (req.method === 'OPTIONS') {
-      const origin = String(req.headers.origin || '');
-      const hostOrigin = `${String(req.headers['x-forwarded-proto'] || 'https')}://${req.headers.host}`;
-      const allowed = String(process.env.ALLOWED_ORIGINS || '').split(',').map(v => v.trim()).filter(Boolean);
-      if (origin && (origin === hostOrigin || allowed.includes(origin))) {
-        res.setHeader('Access-Control-Allow-Origin', origin);
-        res.setHeader('Vary', 'Origin');
-      }
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-      res.status(204).end();
-      return;
-    }
-
-    const gateway = normalise(req.query.gateway);
-    const action  = normalise(req.query.action);
-
-    console.log(
-      `[${requestId}] Payment Router: ${req.method} | gateway=${gateway}, action=${action}`,
-    );
-
-    // ─ Validation ─────────────────────────────────────────────────────────
-    if (!gateway || !action) {
-      console.warn(`[${requestId}] Missing gateway or action`);
-      res.status(400).json({
-        error: 'Missing query parameters: gateway and action are required.',
-        received: { gateway, action },
-        example: '/api/payment?gateway=sslcommerz&action=create-payment',
-      });
-      return;
-    }
-
-    // ─ Inline test-connection handler (no gateway-lib import needed) ──────
-    if (action === 'test-connection') {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const creds: Record<string, string> = (req.body as any)?.credentials || {};
-
-      if (gateway === 'stripe') {
-        const { secretKey } = creds;
-        if (!secretKey) return void res.json({ success: false, error: 'Secret key is required.' });
-        const r = await fetch('https://api.stripe.com/v1/balance', {
-          headers: { Authorization: `Bearer ${secretKey}` },
-        });
-        if (r.ok) return void res.json({ success: true, message: 'Stripe credentials are valid.' });
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const errData = await r.json().catch(() => ({})) as any;
-        return void res.json({ success: false, error: errData?.error?.message || 'Invalid Stripe credentials.' });
-      }
-
-      if (gateway === 'paypal') {
-        const { clientId, clientSecret, sandbox } = creds;
-        if (!clientId || !clientSecret) return void res.json({ success: false, error: 'Client ID and Secret are required.' });
-        const base = sandbox === 'true' ? 'https://api-m.sandbox.paypal.com' : 'https://api-m.paypal.com';
-        const auth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
-        const r = await fetch(`${base}/v1/oauth2/token`, {
-          method: 'POST',
-          headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'grant_type=client_credentials',
-        });
-        if (r.ok) return void res.json({ success: true, message: 'PayPal credentials are valid.' });
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const errData = await r.json().catch(() => ({})) as any;
-        return void res.json({ success: false, error: errData?.error_description || 'Invalid PayPal credentials.' });
-      }
-
-      if (gateway === 'sslcommerz') {
-        const { storeId, storePass, sandbox } = creds;
-        if (!storeId || !storePass) return void res.json({ success: false, error: 'Store ID and Password are required.' });
-        const base = sandbox === 'true' ? 'https://sandbox.sslcommerz.com' : 'https://securepay.sslcommerz.com';
-        // BUG-11 FIX: The validation endpoint authenticates with store_id/store_passwd.
-        // A non-2xx HTTP status means the credentials were rejected before the validator
-        // even ran. Also check the response body for any explicit failure message —
-        // the old code only caught "inactive" / "unauthorized" but SSLCommerz also
-        // returns "FAILED" with a failedreason when the store account is wrong.
-        let r11: Response;
-        try {
-          r11 = await fetch(`${base}/validator/api/validationserverAPI.php?val_id=test&store_id=${encodeURIComponent(storeId)}&store_passwd=${encodeURIComponent(storePass)}&v=1&format=json`);
-        } catch (netErr) {
-          return void res.json({ success: false, error: 'Could not reach SSLCommerz. Check your internet connection.' });
-        }
-        if (!r11.ok) {
-          return void res.json({ success: false, error: `SSLCommerz returned HTTP ${r11.status}. Check your Store ID and Password.` });
-        }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const data11 = await r11.json().catch(() => ({})) as any;
-        const failReason = data11?.failedreason || '';
-        const apiStatus = (data11?.status || '').toUpperCase();
-        // Any explicit failure indicator in the response body means wrong credentials
-        if (failReason || apiStatus === 'FAILED' || apiStatus === 'INVALID') {
-          return void res.json({ success: false, error: failReason || `SSLCommerz validation failed (status: ${apiStatus}).` });
-        }
-        const errMsg = (failReason || apiStatus).toLowerCase();
-        if (errMsg.includes('inactive') || errMsg.includes('unauthorized') || errMsg.includes('invalid')) {
-          return void res.json({ success: false, error: failReason || apiStatus });
-        }
-        return void res.json({ success: true, message: 'SSLCommerz credentials are reachable and accepted.' });
-      }
-
-      if (gateway === 'razorpay') {
-        const { keyId, keySecret } = creds;
-        if (!keyId || !keySecret) return void res.json({ success: false, error: 'Key ID and Key Secret are required.' });
-        const auth = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
-        const r = await fetch('https://api.razorpay.com/v1/payments?count=1', {
-          headers: { Authorization: `Basic ${auth}` },
-        });
-        if (r.ok) return void res.json({ success: true, message: 'Razorpay credentials are valid.' });
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const errData = await r.json().catch(() => ({})) as any;
-        return void res.json({ success: false, error: errData?.error?.description || 'Invalid Razorpay credentials.' });
-      }
-
-      if (gateway === 'bkash') {
-        const { appKey, appSecret, username, password, sandbox } = creds;
-        if (!appKey || !appSecret || !username || !password) {
-          return void res.json({ success: false, error: 'All four bKash credentials are required.' });
-        }
-        const base = sandbox === 'true'
-          ? 'https://tokenized.sandbox.bka.sh/v1.2.0-beta'
-          : 'https://tokenized.pay.bka.sh/v1.2.0-beta';
-        const r = await fetch(`${base}/tokenized/checkout/token/grant`, {
-          method: 'POST',
-          headers: { username, password, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ app_key: appKey, app_secret: appSecret }),
-        });
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const data = await r.json().catch(() => ({})) as any;
-        if (data?.statusCode === '0000' || data?.id_token) {
-          return void res.json({ success: true, message: 'bKash credentials are valid.' });
-        }
-        return void res.json({ success: false, error: data?.statusMessage || 'Invalid bKash credentials.' });
-      }
-
-      if (gateway === 'nagad') {
-        const { merchantId, privateKey } = creds;
-        if (!merchantId || !privateKey) return void res.json({ success: false, error: 'Merchant ID and Private Key are required.' });
-        // BUG-12 FIX: Only checking PEM header/footer is not an API connectivity test.
-        // Nagad's init endpoint requires RSA signing with the merchant's private key;
-        // we cannot perform a zero-side-effect handshake without making a real payment
-        // request. We now validate: (a) PEM structure, (b) key length heuristic (≥ 128
-        // base64 chars inside the envelope — too short means a truncated/corrupted key),
-        // and (c) confirm the merchantId is numeric as Nagad requires.
-        // We are explicit that this is NOT a live API call so admins aren't misled.
-        const pemBody = privateKey.replace(/-----[^-]+-----/g, '').replace(/\s/g, '');
-        const keyOk = privateKey.includes('BEGIN') && privateKey.includes('END') && pemBody.length >= 128;
-        if (!keyOk) return void res.json({ success: false, error: 'Private key is not a valid PEM RSA key (check for truncation or extra whitespace).' });
-        if (!/^\d+$/.test(merchantId.trim())) return void res.json({ success: false, error: 'Nagad Merchant ID must be numeric.' });
-        return void res.json({ success: true, message: 'Nagad credentials have valid format. Note: no live API call was made — the Nagad init endpoint requires a signed payment request; validate with a real test order.' });
-      }
-
-      // ── BUG-13 FIX ─────────────────────────────────────────────────────────────
-      // Previous code returned { success: true } after only checking field presence.
-      // Admins saw a green "Connected" badge even when credentials were completely
-      // wrong — the real failure was invisible until the first live order failed.
-      //
-      // Fix strategy per gateway:
-      //   PayFast  — signed GET to /ping endpoint; auth errors → 403/401.
-      //   JazzCash — signed POST to the inquiry API with a dummy txn ID;
-      //              "invalid credentials" response code → bad creds.
-      //   Easypaisa — signed POST to inquiry; same auth-error detection.
-      //   Paytm    — signed POST to order-status; Paytm returns a distinct
-      //              "INVALID_CHECKSUM" / "INVALID_MID" code on bad creds.
-      //
-      // In all cases: if the gateway itself is unreachable we say so clearly.
-      // If the gateway returns an auth/credential error we return success:false.
-      // Only a definitive "credentials valid" or "transaction not found (but
-      // auth passed)" result returns success:true.
-      // ─────────────────────────────────────────────────────────────────────────
-
-      if (gateway === 'payfast') {
-        const { merchantId, merchantKey, sandbox } = creds;
-        if (!merchantId || !merchantKey) return void res.json({ success: false, error: 'Merchant ID and Merchant Key are required.' });
-        // PayFast ping endpoint — requires signed request headers.
-        // A 200 with "ALIVE" body means API is up AND our sig was accepted.
-        // A 403 means the merchant ID / passphrase is wrong.
-        const pfBase = sandbox === 'true' ? 'https://sandbox.payfast.co.za' : 'https://api.payfast.co.za';
-        const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
-        const pfParams = `merchant-id=${encodeURIComponent(merchantId)}&passphrase=${encodeURIComponent(merchantKey)}&timestamp=${encodeURIComponent(timestamp)}&version=v1`;
-        const { createHash } = await import('crypto');
-        const pfSig = createHash('md5').update(pfParams).digest('hex');
-        let pfRes: Response;
-        try {
-          pfRes = await fetch(`${pfBase}/ping`, {
-            headers: {
-              'merchant-id': merchantId,
-              'version': 'v1',
-              'timestamp': timestamp,
-              'signature': pfSig,
-            },
-          });
-        } catch {
-          return void res.json({ success: false, error: 'Could not reach PayFast API. Check your internet connection.' });
-        }
-        if (pfRes.status === 200) return void res.json({ success: true, message: 'PayFast credentials are valid (ping accepted).' });
-        if (pfRes.status === 403 || pfRes.status === 401) return void res.json({ success: false, error: 'PayFast rejected the credentials — check your Merchant ID and Passphrase.' });
-        return void res.json({ success: false, error: `PayFast returned HTTP ${pfRes.status}. Verify credentials in your PayFast dashboard.` });
-      }
-
-      if (gateway === 'jazzcash') {
-        const { mid, password, hashKey, sandbox } = creds;
-        if (!mid || !password || !hashKey) return void res.json({ success: false, error: 'Merchant ID, Password, and Hash Key are required.' });
-        // JazzCash transaction inquiry with a dummy txn ID.
-        // Credential errors return ResponseCode "111" (Authentication Failed).
-        // "Transaction not found" (106/008) means auth passed — credentials valid.
-        const jcBase = sandbox === 'false'
-          ? 'https://payments.jazzcash.com.pk/ApplicationAPI/API/2.0/PaymentInquiry/Inquire'
-          : 'https://sandbox.jazzcash.com.pk/ApplicationAPI/API/2.0/PaymentInquiry/Inquire';
-        const { createHmac } = await import('crypto');
-        const txRef = 'TEST' + Date.now();
-        const jcData = `${hashKey}&${mid}&${password}&${txRef}`;
-        const jcSig = createHmac('sha256', hashKey).update(jcData).digest('base64');
-        let jcRes: Response;
-        try {
-          jcRes = await fetch(jcBase, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              pp_MerchantID: mid,
-              pp_Password: password,
-              pp_TxnRefNo: txRef,
-              pp_SecureHash: jcSig,
-            }),
-          });
-        } catch {
-          return void res.json({ success: false, error: 'Could not reach JazzCash API. Check your internet connection.' });
-        }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const jcData2 = await jcRes.json().catch(() => ({})) as any;
-        const jcCode = String(jcData2?.pp_ResponseCode || '');
-        if (jcCode === '111' || jcCode === '001') return void res.json({ success: false, error: 'JazzCash authentication failed — check your Merchant ID, Password, and Hash Key.' });
-        // Any other response (106 = txn not found, 200 = ok, etc.) means auth passed
-        return void res.json({ success: true, message: 'JazzCash credentials are valid (inquiry API accepted authentication).' });
-      }
-
-      if (gateway === 'easypaisa') {
-        const { storeId, hashKey, sandbox } = creds;
-        if (!storeId || !hashKey) return void res.json({ success: false, error: 'Store ID and Hash Key are required.' });
-        // Easypaisa transaction status query with dummy order ref.
-        // An auth failure returns status "02" (Authentication Failed).
-        const epBase = sandbox === 'false'
-          ? 'https://easypaisa.com.pk/easypay/Index.jsf'
-          : 'https://easypaisa.com.pk/easypay/Index.jsf';
-        const { createHash: createHashEp } = await import('crypto');
-        const epOrderRef = 'TEST' + Date.now();
-        const epHashStr = `amount=&orderRefNum=${epOrderRef}&paymentToken=&storeId=${storeId}&timeStamp=${Date.now()}&token=&hashKey=${hashKey}`;
-        const epHash = createHashEp('sha256').update(epHashStr).digest('hex').toUpperCase();
-        let epRes: Response;
-        try {
-          epRes = await fetch(epBase, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: new URLSearchParams({
-              storeId, orderRefNum: epOrderRef,
-              paymentToken: '', timeStamp: String(Date.now()),
-              signature: epHash, encryptedHashRequest: '',
-              postBackURL: '', mobileAccountNo: '',
-            }).toString(),
-          });
-        } catch {
-          return void res.json({ success: false, error: 'Could not reach Easypaisa API. Check your internet connection.' });
-        }
-        const epText = await epRes.text().catch(() => '');
-        if (epText.includes('Authentication') || epText.includes('Invalid Store') || epRes.status === 401 || epRes.status === 403) {
-          return void res.json({ success: false, error: 'Easypaisa rejected the credentials — check your Store ID and Hash Key.' });
-        }
-        // Got a response from Easypaisa server (even "transaction not found" = auth ok)
-        return void res.json({ success: true, message: 'Easypaisa endpoint is reachable and accepted the request format. Validate with a sandbox test order to confirm the Hash Key.' });
-      }
-
-      if (gateway === 'paytm') {
-        const { mid, key, sandbox } = creds;
-        if (!mid || !key) return void res.json({ success: false, error: 'Merchant ID and Merchant Key are required.' });
-        // Paytm order status API — sends a signed checksum. A bad MID/key returns
-        // INVALID_MID or INVALID_CHECKSUM in the body.
-        const ptBase = sandbox === 'false'
-          ? 'https://securegw.paytm.in'
-          : 'https://securegw-stage.paytm.in';
-        const { createHmac: createHmacPt } = await import('crypto');
-        const ptOrderId = 'TEST_' + Date.now();
-        const ptBody = JSON.stringify({ body: { mid, orderId: ptOrderId } });
-        const ptSig = createHmacPt('sha256', key).update(ptBody).digest('base64');
-        let ptRes: Response;
-        try {
-          ptRes = await fetch(`${ptBase}/v3/order/status`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-mid': mid,
-              'x-checksum': ptSig,
-            },
-            body: ptBody,
-          });
-        } catch {
-          return void res.json({ success: false, error: 'Could not reach Paytm API. Check your internet connection.' });
-        }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const ptData = await ptRes.json().catch(() => ({})) as any;
-        const ptCode = ptData?.body?.resultInfo?.resultCode || ptData?.resultInfo?.resultCode || '';
-        if (String(ptCode).includes('INVALID') || String(ptCode) === 'GW_0002') {
-          return void res.json({ success: false, error: `Paytm rejected the credentials (${ptCode}) — check your Merchant ID and Key.` });
-        }
-        return void res.json({ success: true, message: 'Paytm API is reachable and authentication passed. Validate with a sandbox test order.' });
-      }
-
-      return void res.json({ success: false, error: `Test connection not supported for gateway: ${gateway}` });
-    }
-
-    const gatewayActions = ROUTE_MAP[gateway];
-    if (!gatewayActions) {
-      console.warn(`[${requestId}] Unknown gateway: ${gateway}`);
-      res.status(404).json({
-        error: `Unknown gateway: "${gateway}"`,
-        available: Object.keys(ROUTE_MAP),
-      });
-      return;
-    }
-
-    const handler = gatewayActions[action];
-    if (!handler) {
-      console.warn(
-        `[${requestId}] Unknown action for gateway ${gateway}: ${action}`,
-      );
-      res.status(404).json({
-        error: `Unknown action "${action}" for gateway "${gateway}"`,
-        available: Object.keys(gatewayActions),
-      });
-      return;
-    }
-
-    // ─ Invoke the handler ──────────────────────────────────────────────────
-    console.log(`[${requestId}] Invoking ${gateway}/${action}...`);
-    const result = await handler(req, res);
-
-    const elapsed = Date.now() - startTime;
-    console.log(
-      `[${requestId}] Success: ${gateway}/${action} completed in ${elapsed}ms`,
-    );
-  } catch (err: any) {
-    const elapsed = Date.now() - startTime;
-    console.error(`[${requestId}] ERROR after ${elapsed}ms:`, {
-      message: err?.message,
-      stack: err?.stack,
-      name: err?.name,
-    });
-
-    if (!res.headersSent) {
-      res.status(500).json({
-        error: 'Payment router encountered an error',
-        message: err?.message ?? 'Unknown error',
-        requestId,
-      });
-    }
+function getOrigin(req: VercelRequest): string {
+  const proto = (req.headers['x-forwarded-proto'] as string) || 'https';
+  return `${proto}://${req.headers.host}`;
+}
+function ok(res: VercelResponse, body: unknown) { return res.status(200).json(body); }
+function fail(res: VercelResponse, status: number, msg: string, extra?: object) {
+  return res.status(status).json({ success: false, error: msg, ...extra });
+}
+function getCreds(gw: string): Record<string, string> {
+  const e = (k: string) => String(process.env[k] || '').trim();
+  switch (gw) {
+    case 'stripe':     return { secretKey: e('STRIPE_SECRET_KEY'), publicKey: e('STRIPE_PUBLIC_KEY') };
+    case 'paypal':     return { clientId: e('PAYPAL_CLIENT_ID'), clientSecret: e('PAYPAL_CLIENT_SECRET'), isSandbox: e('PAYPAL_SANDBOX') || 'true' };
+    case 'sslcommerz': return { storeId: e('SSLCZ_STORE_ID'), storePass: e('SSLCZ_STORE_PASSWORD'), isSandbox: e('SSLCZ_SANDBOX') || 'true' };
+    case 'nagad':      return { merchantId: e('NAGAD_MERCHANT_ID'), merchantNumber: e('NAGAD_MERCHANT_NUMBER'), publicKey: e('NAGAD_PUBLIC_KEY'), privateKey: e('NAGAD_PRIVATE_KEY'), isSandbox: e('NAGAD_SANDBOX') || 'true' };
+    case 'razorpay':   return { keyId: e('RAZORPAY_KEY_ID'), keySecret: e('RAZORPAY_KEY_SECRET') };
+    case 'bkash':      return { appKey: e('BKASH_APP_KEY'), appSecret: e('BKASH_APP_SECRET'), username: e('BKASH_USERNAME'), password: e('BKASH_PASSWORD'), isSandbox: e('BKASH_SANDBOX') || 'true' };
+    default: return {};
   }
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-/**
- * Safely coerce a VercelRequest query value to a plain lowercase string.
- */
-function normalise(value: string | string[] | undefined): string {
-  if (!value) return '';
-  const str = Array.isArray(value) ? value[0] : value;
-  if (typeof str !== 'string') return '';
-  return str.trim().toLowerCase();
+// ── BKASH ─────────────────────────────────────────────────────────────────
+function bkashBase(sandbox: boolean) {
+  return sandbox
+    ? 'https://tokenized.sandbox.bka.sh/v1.2.0-beta/tokenized/checkout'
+    : 'https://tokenized.pay.bka.sh/v1.2.0-beta/tokenized/checkout';
+}
+async function bkashToken(appKey: string, appSecret: string, username: string, password: string, sandbox: boolean) {
+  const r = await fetch(`${bkashBase(sandbox)}/token/grant`, {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json', username, password },
+    body: JSON.stringify({ app_key: appKey, app_secret: appSecret }),
+  });
+  const d: any = await r.json().catch(() => ({}));
+  if (!d.id_token) throw new Error(d.statusMessage || `bKash token failed (${r.status})`);
+  return d.id_token as string;
+}
+async function bkashCreatePayment(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') return fail(res, 405, 'Method not allowed');
+  const { amount, orderId, callbackURL, sandboxMode = true } = req.body || {};
+  if (!amount || !callbackURL) return fail(res, 400, 'amount and callbackURL required');
+  const c = getCreds('bkash');
+  if (!c.appKey || !c.appSecret || !c.username || !c.password)
+    return fail(res, 400, 'Missing bKash credentials: BKASH_APP_KEY, BKASH_APP_SECRET, BKASH_USERNAME, BKASH_PASSWORD');
+  try {
+    const sandbox = sandboxMode !== false && c.isSandbox !== 'false';
+    const token = await bkashToken(c.appKey, c.appSecret, c.username, c.password, sandbox);
+    const r = await fetch(`${bkashBase(sandbox)}/create`, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', Authorization: token, 'X-APP-Key': c.appKey },
+      body: JSON.stringify({ mode: '0011', payerReference: orderId || `QF-${Date.now()}`, callbackURL, amount: Number(amount).toFixed(2), currency: 'BDT', intent: 'sale', merchantInvoiceNumber: orderId }),
+    });
+    const d: any = await r.json().catch(() => ({}));
+    if (!d.bkashURL) return fail(res, 502, d.statusMessage || 'bKash create failed');
+    return ok(res, { success: true, bkashURL: d.bkashURL, paymentID: d.paymentID });
+  } catch (e: any) { return fail(res, 500, e.message); }
+}
+async function bkashExecutePayment(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') return fail(res, 405, 'Method not allowed');
+  const { paymentID, paymentId, sandboxMode = true } = req.body || {};
+  const pid = paymentID || paymentId;
+  if (!pid) return fail(res, 400, 'paymentID required');
+  const c = getCreds('bkash');
+  if (!c.appKey) return fail(res, 400, 'Missing bKash credentials');
+  try {
+    const sandbox = sandboxMode !== false && c.isSandbox !== 'false';
+    const token = await bkashToken(c.appKey, c.appSecret, c.username, c.password, sandbox);
+    const r = await fetch(`${bkashBase(sandbox)}/execute`, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', Authorization: token, 'X-APP-Key': c.appKey },
+      body: JSON.stringify({ paymentID: pid }),
+    });
+    const d: any = await r.json().catch(() => ({}));
+    if (d.transactionStatus !== 'Completed') return fail(res, 502, d.statusMessage || 'bKash execute failed', { transactionStatus: d.transactionStatus });
+    return ok(res, { success: true, paymentID: d.paymentID, transactionId: d.trxID, amount: d.amount });
+  } catch (e: any) { return fail(res, 500, e.message); }
+}
+
+// ── NAGAD ─────────────────────────────────────────────────────────────────
+const NAGAD_PUB =
+  '-----BEGIN PUBLIC KEY-----\n' +
+  'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAty2hOpfNUS4NLFNwhJsy\n' +
+  'JCfsLisFqcU8RcZGtUE/9SqLNCBR5GoxFAyx0RBfDOyOXyVlAj4nBjBKLi63rGzG\n' +
+  'a04L+y4SLZjzukWZSrkXa3kcMtH2QQ1JcSf1hEt+gNW1u/m+ZHrXnXjg1JG9wKjN\n' +
+  '/0HHTtA9rIa9XwIDAQAB\n' +
+  '-----END PUBLIC KEY-----';
+function nagadEncrypt(data: string, pub: string) {
+  return crypto.publicEncrypt({ key: pub, padding: crypto.constants.RSA_PKCS1_PADDING }, Buffer.from(data)).toString('base64');
+}
+function nagadSign(data: string, priv: string) {
+  const s = crypto.createSign('SHA256'); s.update(data); s.end(); return s.sign(priv, 'base64');
+}
+function asPem(key: string, label: 'PUBLIC' | 'PRIVATE') {
+  if (key.includes('-----BEGIN')) return key.replace(/\\n/g, '\n');
+  return `-----BEGIN ${label} KEY-----\n${key}\n-----END ${label} KEY-----`;
+}
+async function nagadCreatePayment(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') return fail(res, 405, 'Method not allowed');
+  const { amount, orderId, callbackUrl: cb, sandboxMode } = req.body || {};
+  if (!amount || !orderId) return fail(res, 400, 'amount and orderId required');
+  const c = getCreds('nagad');
+  if (!c.merchantId || !c.privateKey) return fail(res, 400, 'Missing NAGAD_MERCHANT_ID or NAGAD_PRIVATE_KEY');
+  const sandbox = sandboxMode !== false && c.isSandbox !== 'false';
+  const base = sandbox
+    ? 'https://sandbox.mynagad.com:10080/remote-payment-gateway-1.0/api/dfs'
+    : 'https://api.mynagad.com/api/dfs';
+  try {
+    const privKey = asPem(c.privateKey, 'PRIVATE');
+    const datetime = new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 14);
+    const challenge = crypto.randomBytes(20).toString('hex');
+    const sensitive = { merchantId: c.merchantId, datetime, orderId, challenge };
+    const enc = nagadEncrypt(JSON.stringify(sensitive), NAGAD_PUB);
+    const sig = nagadSign(JSON.stringify(sensitive), privKey);
+    const initR = await fetch(`${base}/check-out/initialize/${c.merchantId}/${orderId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-KM-IP-V4': (req.headers['x-forwarded-for'] as string) || '127.0.0.1', 'X-KM-Client-Type': 'PC_WEB', 'X-KM-Api-Version': 'v-0.2.0' },
+      body: JSON.stringify({ dateTime: datetime, sensitiveData: enc, signature: sig }),
+    });
+    const initJ: any = await initR.json();
+    if (!initJ?.sensitiveData) return fail(res, 502, 'Nagad init failed');
+    const cSens = { merchantId: c.merchantId, orderId, amount: String(amount), currencyCode: '050', challenge };
+    const cEnc = nagadEncrypt(JSON.stringify(cSens), NAGAD_PUB);
+    const cSig = nagadSign(JSON.stringify(cSens), privKey);
+    const callbackUrl = cb || `${getOrigin(req)}/?nagad=callback&orderId=${orderId}`;
+    const confR = await fetch(`${base}/check-out/complete/${initJ.paymentReferenceId}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sensitiveData: cEnc, signature: cSig, merchantCallbackURL: callbackUrl }),
+    });
+    const confJ: any = await confR.json();
+    if (!confJ?.callBackUrl) return fail(res, 502, 'Nagad confirm failed');
+    return ok(res, { success: true, callBackUrl: confJ.callBackUrl, orderId });
+  } catch (e: any) { return fail(res, 500, e.message); }
+}
+async function nagadVerifyPayment(req: VercelRequest, res: VercelResponse) {
+  const refId = (req.query.payment_ref_id as string) || req.body?.paymentRefId;
+  if (!refId) return fail(res, 400, 'paymentRefId required');
+  const c = getCreds('nagad');
+  const base = c.isSandbox !== 'false'
+    ? 'https://sandbox.mynagad.com:10080/remote-payment-gateway-1.0/api/dfs'
+    : 'https://api.mynagad.com/api/dfs';
+  const r = await fetch(`${base}/verify/payment/${refId}`).catch(() => null);
+  if (!r) return fail(res, 502, 'Nagad unreachable');
+  const j: any = await r.json().catch(() => ({}));
+  return ok(res, { success: j?.status === 'Success' || j?.statusCode === '000', raw: j });
+}
+
+// ── SSLCOMMERZ ────────────────────────────────────────────────────────────
+const _sslPending = new Set<string>();
+async function sslcommerzCreatePayment(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') return fail(res, 405, 'Method not allowed');
+  const { amount, orderId, customer = {}, productName = 'Order', sandboxMode } = req.body || {};
+  if (!amount || !orderId) return fail(res, 400, 'amount and orderId required');
+  if (_sslPending.has(String(orderId))) return fail(res, 429, 'Already processing');
+  _sslPending.add(String(orderId));
+  try {
+    const c = getCreds('sslcommerz');
+    if (sandboxMode !== undefined) c.isSandbox = String(sandboxMode);
+    if (!c.storeId || !c.storePass) return fail(res, 400, 'Missing SSLCZ_STORE_ID or SSLCZ_STORE_PASSWORD');
+    const sandbox = c.isSandbox !== 'false';
+    const base = sandbox ? 'https://sandbox.sslcommerz.com' : 'https://securepay.sslcommerz.com';
+    const origin = getOrigin(req);
+    const form = new URLSearchParams({
+      store_id: c.storeId, store_passwd: c.storePass,
+      total_amount: Number(amount).toFixed(2), currency: 'BDT', tran_id: String(orderId),
+      success_url: `${origin}/api/payment?gateway=sslcommerz&action=ipn&status=success&orderId=${encodeURIComponent(orderId)}`,
+      fail_url:    `${origin}/api/payment?gateway=sslcommerz&action=ipn&status=fail&orderId=${encodeURIComponent(orderId)}`,
+      cancel_url:  `${origin}/api/payment?gateway=sslcommerz&action=ipn&status=cancel&orderId=${encodeURIComponent(orderId)}`,
+      ipn_url:     `${origin}/api/payment?gateway=sslcommerz&action=ipn`,
+      cus_name: String(customer.name || 'Customer'), cus_email: String(customer.email || 'noreply@example.com'),
+      cus_phone: String(customer.phone || '01700000000'), cus_add1: String(customer.address || 'N/A'),
+      cus_city: String(customer.city || 'Dhaka'), cus_country: String(customer.country || 'Bangladesh'),
+      shipping_method: 'NO', product_name: String(productName),
+      product_category: 'general', product_profile: 'general', num_of_item: '1', value_a: String(orderId),
+    });
+    const r = await fetch(`${base}/gwprocess/v4/api.php`, {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form.toString(),
+    });
+    const text = await r.text();
+    let j: any;
+    try { j = JSON.parse(text); } catch { return fail(res, 502, 'SSLCommerz invalid response'); }
+    if (j?.status !== 'SUCCESS' || !j?.GatewayPageURL) return fail(res, 502, j?.failedreason || 'SSLCommerz session failed');
+    return ok(res, { success: true, redirectUrl: j.GatewayPageURL, sessionkey: j.sessionkey });
+  } catch (e: any) { return fail(res, 500, e.message); }
+  finally { setTimeout(() => _sslPending.delete(String(orderId)), 30_000); }
+}
+async function sslcommerzIpn(req: VercelRequest, res: VercelResponse) {
+  const body   = req.method === 'POST' ? (req.body || {}) : {};
+  const status  = String(body.status  || req.query.status  || 'unknown');
+  const orderId = String(body.tran_id || req.query.orderId || '');
+  const valId   = body.val_id as string | undefined;
+  let verified = false;
+  if (valId) {
+    const c = getCreds('sslcommerz');
+    const base = c.isSandbox !== 'false' ? 'https://sandbox.sslcommerz.com' : 'https://securepay.sslcommerz.com';
+    const vr = await fetch(`${base}/validator/api/validationserverAPI.php?val_id=${encodeURIComponent(valId)}&store_id=${encodeURIComponent(c.storeId)}&store_passwd=${encodeURIComponent(c.storePass)}&format=json`).catch(() => null);
+    if (vr?.ok) { const vj: any = await vr.json().catch(() => ({})); verified = vj?.status === 'VALID' || vj?.status === 'VALIDATED'; }
+  }
+  const flag = status === 'success' ? (verified ? 'success' : 'fail') : status;
+  return res.redirect(302, `${getOrigin(req)}/?sslcz=${flag}&orderId=${encodeURIComponent(orderId)}`);
+}
+
+// ── STRIPE ────────────────────────────────────────────────────────────────
+async function stripeCreatePaymentIntent(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') return fail(res, 405, 'Method not allowed');
+  const { amount, currency = 'usd' } = req.body || {};
+  if (!amount) return fail(res, 400, 'amount required');
+  const c = getCreds('stripe');
+  if (!c.secretKey) return fail(res, 400, 'Missing STRIPE_SECRET_KEY');
+  const r = await fetch('https://api.stripe.com/v1/payment_intents', {
+    method: 'POST', headers: { Authorization: `Bearer ${c.secretKey}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ amount: String(Math.round(Number(amount) * 100)), currency: String(currency).toLowerCase(), 'automatic_payment_methods[enabled]': 'true' }).toString(),
+  });
+  const d: any = await r.json();
+  if (d.error) return fail(res, 502, d.error.message);
+  return ok(res, { success: true, clientSecret: d.client_secret, paymentIntentId: d.id });
+}
+async function stripeConfirmPayment(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') return fail(res, 405, 'Method not allowed');
+  const { paymentIntentId, paymentMethodId } = req.body || {};
+  if (!paymentIntentId || !paymentMethodId) return fail(res, 400, 'paymentIntentId and paymentMethodId required');
+  const c = getCreds('stripe');
+  if (!c.secretKey) return fail(res, 400, 'Missing STRIPE_SECRET_KEY');
+  const r = await fetch(`https://api.stripe.com/v1/payment_intents/${paymentIntentId}/confirm`, {
+    method: 'POST', headers: { Authorization: `Bearer ${c.secretKey}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ payment_method: paymentMethodId }).toString(),
+  });
+  const d: any = await r.json();
+  if (d.error) return fail(res, 502, d.error.message);
+  return ok(res, { success: true, status: d.status, transactionId: d.id });
+}
+async function stripeCreateCheckoutSession(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') return fail(res, 405, 'Method not allowed');
+  const { amount, currency = 'usd', orderId, productName = 'Order', customerEmail, successUrl, cancelUrl } = req.body || {};
+  if (!amount || !successUrl || !cancelUrl) return fail(res, 400, 'amount, successUrl, cancelUrl required');
+  const c = getCreds('stripe');
+  if (!c.secretKey) return fail(res, 400, 'Missing STRIPE_SECRET_KEY');
+  const p = new URLSearchParams({
+    mode: 'payment', success_url: successUrl, cancel_url: cancelUrl,
+    'line_items[0][quantity]': '1',
+    'line_items[0][price_data][currency]': String(currency).toLowerCase(),
+    'line_items[0][price_data][unit_amount]': String(Math.round(Number(amount) * 100)),
+    'line_items[0][price_data][product_data][name]': String(productName).slice(0, 250),
+  });
+  if (customerEmail) p.set('customer_email', String(customerEmail));
+  if (orderId) { p.set('client_reference_id', String(orderId)); p.set('metadata[orderId]', String(orderId)); }
+  const r = await fetch('https://api.stripe.com/v1/checkout/sessions', {
+    method: 'POST', headers: { Authorization: `Bearer ${c.secretKey}`, 'Content-Type': 'application/x-www-form-urlencoded' }, body: p.toString(),
+  });
+  const d: any = await r.json();
+  if (d.error || !d.url) return fail(res, 502, d.error?.message || 'Stripe checkout failed');
+  return ok(res, { success: true, sessionId: d.id, url: d.url });
+}
+
+// ── PAYPAL ────────────────────────────────────────────────────────────────
+async function ppToken(clientId: string, secret: string, sandbox: boolean) {
+  const base = sandbox ? 'https://api-m.sandbox.paypal.com' : 'https://api-m.paypal.com';
+  const r = await fetch(`${base}/v1/oauth2/token`, {
+    method: 'POST',
+    headers: { Authorization: 'Basic ' + Buffer.from(`${clientId}:${secret}`).toString('base64'), 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'grant_type=client_credentials',
+  });
+  const d: any = await r.json();
+  if (!d.access_token) throw new Error('PayPal token failed');
+  return { token: d.access_token as string, base };
+}
+async function paypalCreateOrder(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') return fail(res, 405, 'Method not allowed');
+  const { amount, currency = 'USD', sandboxMode } = req.body || {};
+  if (!amount) return fail(res, 400, 'amount required');
+  const c = getCreds('paypal');
+  if (sandboxMode !== undefined) c.isSandbox = String(sandboxMode);
+  if (!c.clientId || !c.clientSecret) return fail(res, 400, 'Missing PAYPAL_CLIENT_ID or PAYPAL_CLIENT_SECRET');
+  try {
+    const sandbox = c.isSandbox !== 'false';
+    const { token, base } = await ppToken(c.clientId, c.clientSecret, sandbox);
+    const origin = getOrigin(req);
+    const r = await fetch(`${base}/v2/checkout/orders`, {
+      method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        intent: 'CAPTURE',
+        purchase_units: [{ amount: { currency_code: String(currency).toUpperCase(), value: Number(amount).toFixed(2) } }],
+        application_context: {
+          return_url: `${origin}/api/payment?gateway=paypal&action=callback&status=success`,
+          cancel_url: `${origin}/api/payment?gateway=paypal&action=callback&status=cancelled`,
+        },
+      }),
+    });
+    const d: any = await r.json();
+    if (!d.id) return fail(res, 502, 'PayPal order failed');
+    return ok(res, { success: true, orderId: d.id, approvalUrl: d.links?.find((l: any) => l.rel === 'approve')?.href });
+  } catch (e: any) { return fail(res, 500, e.message); }
+}
+async function paypalCaptureOrder(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') return fail(res, 405, 'Method not allowed');
+  const { orderId } = req.body || {};
+  if (!orderId) return fail(res, 400, 'orderId required');
+  const c = getCreds('paypal');
+  if (!c.clientId || !c.clientSecret) return fail(res, 400, 'Missing PayPal credentials');
+  try {
+    const { token, base } = await ppToken(c.clientId, c.clientSecret, c.isSandbox !== 'false');
+    const r = await fetch(`${base}/v2/checkout/orders/${orderId}/capture`, {
+      method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    });
+    const d: any = await r.json();
+    if (d.status === 'COMPLETED') return ok(res, { success: true, transactionId: d.purchase_units?.[0]?.payments?.captures?.[0]?.id });
+    return fail(res, 502, 'PayPal capture failed');
+  } catch (e: any) { return fail(res, 500, e.message); }
+}
+function paypalCallback(req: VercelRequest, res: VercelResponse) {
+  const { token, status } = req.query;
+  return res.redirect(302, `${getOrigin(req)}/?paypal=${status === 'cancelled' ? 'cancelled' : 'approved'}&orderId=${token || ''}`);
+}
+
+// ── RAZORPAY ──────────────────────────────────────────────────────────────
+async function razorpayCreateOrder(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') return fail(res, 405, 'Method not allowed');
+  const { amount, currency = 'INR', orderId } = req.body || {};
+  if (!amount) return fail(res, 400, 'amount required');
+  const c = getCreds('razorpay');
+  if (!c.keyId || !c.keySecret) return fail(res, 400, 'Missing RAZORPAY_KEY_ID or RAZORPAY_KEY_SECRET');
+  const r = await fetch('https://api.razorpay.com/v1/orders', {
+    method: 'POST',
+    headers: { Authorization: 'Basic ' + Buffer.from(`${c.keyId}:${c.keySecret}`).toString('base64'), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ amount: Math.round(Number(amount) * 100), currency, receipt: String(orderId || `r_${Date.now()}`) }),
+  });
+  const d: any = await r.json();
+  if (!d.id) return fail(res, 502, 'Razorpay order failed');
+  return ok(res, { success: true, orderId: d.id, amount: d.amount, currency: d.currency, keyId: c.keyId });
+}
+async function razorpayVerifyPayment(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') return fail(res, 405, 'Method not allowed');
+  const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
+  if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) return fail(res, 400, 'Missing fields');
+  const c = getCreds('razorpay');
+  if (!c.keySecret) return fail(res, 400, 'Missing RAZORPAY_KEY_SECRET');
+  const expected = crypto.createHmac('sha256', c.keySecret).update(`${razorpay_order_id}|${razorpay_payment_id}`).digest('hex');
+  const verified = expected.length === String(razorpay_signature).length &&
+    crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(String(razorpay_signature)));
+  return ok(res, { success: verified, verified });
+}
+
+// ── ROUTER ────────────────────────────────────────────────────────────────
+type H = (req: VercelRequest, res: VercelResponse) => unknown;
+const ROUTES: Record<string, Record<string, H>> = {
+  bkash:      { 'create-payment': bkashCreatePayment, 'execute-payment': bkashExecutePayment },
+  nagad:      { 'create-payment': nagadCreatePayment, 'verify-payment': nagadVerifyPayment },
+  sslcommerz: { 'create-payment': sslcommerzCreatePayment, 'ipn': sslcommerzIpn },
+  stripe:     { 'create-payment-intent': stripeCreatePaymentIntent, 'confirm-payment': stripeConfirmPayment, 'create-checkout-session': stripeCreateCheckoutSession },
+  paypal:     { 'create-order': paypalCreateOrder, 'capture-order': paypalCaptureOrder, 'callback': paypalCallback },
+  razorpay:   { 'create-order': razorpayCreateOrder, 'verify-payment': razorpayVerifyPayment },
+};
+function norm(v: string | string[] | undefined) {
+  return (Array.isArray(v) ? v[0] : v || '').trim().toLowerCase();
+}
+
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  if (req.method === 'OPTIONS') {
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+    return res.status(204).end();
+  }
+  const gateway = norm(req.query.gateway);
+  const action  = norm(req.query.action);
+  if (!gateway || !action) return fail(res, 400, 'Missing ?gateway=&action=', { available: Object.keys(ROUTES) });
+  const gr = ROUTES[gateway];
+  if (!gr) return fail(res, 404, `Unknown gateway: ${gateway}`, { available: Object.keys(ROUTES) });
+  const fn = gr[action];
+  if (!fn) return fail(res, 404, `Unknown action: ${action}`, { available: Object.keys(gr) });
+  try { await fn(req, res); } catch (e: any) { if (!res.headersSent) fail(res, 500, e?.message || 'Error'); }
 }
