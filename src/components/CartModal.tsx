@@ -171,6 +171,7 @@ export const CartModal = ({ isOpen, onClose, emailVerified = true }: CartModalPr
     sendCheckoutEmailOtp,
     verifyCheckoutEmailOtp,
     ensureUserAfterCheckout,
+    isLoading: paymentSettingsLoading,
   } = useApp();
 
   const toast = useToast();
@@ -2360,6 +2361,20 @@ export const CartModal = ({ isOpen, onClose, emailVerified = true }: CartModalPr
               {/* ─── Payment method ─── */}
               <div>
                 <label className="block text-[10px] font-bold uppercase text-slate-500 mb-2">Payment Method *</label>
+                {/* Payment loading skeleton: shown in incognito (no cache) while DB fetch is in progress */}
+                {paymentSettingsLoading && ([
+                    'COD', 'bKash', 'Nagad', 'SSLCommerz',
+                  ].every(m => !isPaymentMethodEnabled(m))) && (
+                  <div className="grid grid-cols-2 sm:grid-cols-2 gap-2">
+                    {[1,2,3,4].map(i => (
+                      <div key={i}
+                        className="min-h-[68px] flex flex-col items-center justify-center gap-2 px-2 py-2 border border-slate-100 rounded-xl bg-slate-50 animate-pulse">
+                        <div className="w-14 h-4 bg-slate-200 rounded" />
+                        <div className="w-10 h-2 bg-slate-100 rounded" />
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div className="grid grid-cols-2 sm:grid-cols-2 gap-2">
                   {([
                     { id: 'COD',           fallbackLabel: 'Cash on Delivery',  icon: <ShoppingBag className="w-4 h-4" />, enabled: paymentSettings.codEnabled !== false,              displayName: paymentSettings.codDisplayName,              logoUrl: paymentSettings.codLogoImageUrl },
