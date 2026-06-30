@@ -1750,19 +1750,25 @@ export const AppProvider = ({ children }: { children: React.ReactNode }) => {
         const storeName = siteSettings?.websiteName || 'E-Shop';
         // BUG-43 FIX: Include a deeplink so the customer lands on the forgot-password
         // flow automatically without having to find it themselves.
-        const resetUrl = `${window.location.origin}/?action=forgot-password&email=${encodeURIComponent(profile.email)}`;
+        const resetUrl = `${window.location.origin}/?action=set-password&email=${encodeURIComponent(profile.email)}`;
         await fetch('/api/send-email', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             to: profile.email,
             subject: `Set your ${storeName} account password`,
-            html: `<div style="font-family:sans-serif;max-width:480px;margin:auto;padding:24px;background:#f8fafc;border-radius:12px;">
-              <h2 style="color:#0f172a;margin:0 0 12px;">Welcome to ${storeName}, ${profile.name}!</h2>
-              <p style="color:#475569;font-size:14px;">We created an account for you so you can track your orders. Use the code below to set your password.</p>
-              <div style="background:#fff;border:2px dashed #6366f1;border-radius:10px;padding:18px;margin:18px 0;text-align:center;font-size:30px;letter-spacing:8px;font-weight:800;color:#3730a3;">${code}</div>
-              <div style="text-align:center;margin:16px 0;"><a href="${resetUrl}" style="display:inline-block;background:#6366f1;color:#fff;text-decoration:none;padding:12px 28px;border-radius:8px;font-weight:700;font-size:14px;">Set My Password →</a></div>
-              <p style="color:#64748b;font-size:12px;">This code expires in ${expiryMinutes} minutes. You are already logged in on the device where you placed the order.</p>
+            html: `<div style="font-family:Arial,Helvetica,sans-serif;max-width:480px;margin:auto;background:#ffffff;border-radius:12px;border:1px solid #e2e8f0;overflow:hidden;">
+              <div style="background:#059669;padding:28px 24px;text-align:center;">
+                <div style="color:#ffffff;font-size:22px;font-weight:900;letter-spacing:-0.5px;">${storeName}</div>
+                <div style="color:#d1fae5;font-size:13px;margin-top:4px;">Account Created</div>
+              </div>
+              <div style="padding:28px 24px;">
+                <h2 style="color:#0f172a;margin:0 0 8px;font-size:18px;">Welcome, ${profile.name}!</h2>
+                <p style="color:#475569;font-size:14px;margin:0 0 20px;line-height:1.6;">We created an account so you can track your orders. Use the code below to set your password.</p>
+                <div style="background:#f8fafc;border:2px dashed #6366f1;border-radius:10px;padding:20px;margin:0 0 20px;text-align:center;font-size:32px;letter-spacing:10px;font-weight:900;color:#3730a3;font-family:monospace;">${code}</div>
+                <div style="text-align:center;margin:0 0 20px;"><a href="${resetUrl}" style="display:inline-block;background:#6366f1;color:#ffffff;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:700;font-size:15px;">Set My Password</a></div>
+                <p style="color:#94a3b8;font-size:12px;text-align:center;margin:0;">Code expires in ${expiryMinutes} minutes.</p>
+              </div>
             </div>`,
             smtpSettings: smtpSettings ? { ...smtpSettings, fromName: smtpSettings.fromName || storeName } : null,
           }),
@@ -2197,16 +2203,25 @@ export const AppProvider = ({ children }: { children: React.ReactNode }) => {
       const order = orders.find(o => o.id === orderId);
       if (!order || !order.email) return;
       const storeName = siteSettings?.websiteName || 'Fruitopia';
-      const statusEmojis: Record<string, string> = {
-        'Pending': '🕐', 'Processing': '👩‍🍳', 'Confirmed': '✅',
-        'Shipped': '🚚', 'Delivered': '📦', 'Cancelled': '❌', 'Refunded': '💳',
+      // Status badge colors — clean HTML instead of emoji (emoji render broken in Gmail)
+      const statusColors: Record<string, { bg: string; text: string }> = {
+        'Pending':    { bg: '#fef3c7', text: '#92400e' },
+        'Processing': { bg: '#dbeafe', text: '#1e40af' },
+        'Confirmed':  { bg: '#d1fae5', text: '#065f46' },
+        'Shipped':    { bg: '#ede9fe', text: '#5b21b6' },
+        'Delivered':  { bg: '#d1fae5', text: '#065f46' },
+        'Cancelled':  { bg: '#fee2e2', text: '#991b1b' },
+        'Refunded':   { bg: '#f1f5f9', text: '#475569' },
       };
-      const emoji = statusEmojis[status] || '📋';
+      const badgeColor = statusColors[status] || { bg: '#f1f5f9', text: '#475569' };
+      const emoji = ''; // kept for template compatibility — no longer used in default template
       const statusHtml = (
         smtpSettings?.orderStatusTemplate ||
-        `<div style="font-family:sans-serif;max-width:480px;margin:auto;padding:24px;background:#f8fafc;border-radius:12px;">
-          <div style="text-align:center;font-size:48px;margin-bottom:12px;">${emoji}</div>
-          <h2 style="color:#0f172a;text-align:center;margin:0;">Order Status Updated</h2>
+        `<div style="font-family:Arial,Helvetica,sans-serif;max-width:480px;margin:auto;padding:32px 24px;background:#ffffff;border-radius:12px;border:1px solid #e2e8f0;">
+          <div style="text-align:center;margin-bottom:24px;">
+            <div style="display:inline-block;background:#059669;color:#ffffff;border-radius:50%;width:56px;height:56px;line-height:56px;font-size:24px;font-weight:900;text-align:center;">&#10003;</div>
+          </div>
+          <h2 style="color:#0f172a;text-align:center;margin:0 0 4px;">Order Status Updated</h2>
           <p style="color:#64748b;text-align:center;font-size:14px;">Order #<strong>{{orderNumber}}</strong></p>
           <div style="background:#fff;border:2px solid #e2e8f0;border-radius:10px;padding:20px;text-align:center;margin:20px 0;">
             <p style="color:#64748b;font-size:12px;margin:0 0 4px;text-transform:uppercase;letter-spacing:0.05em;">Current Status</p>
@@ -2222,7 +2237,7 @@ export const AppProvider = ({ children }: { children: React.ReactNode }) => {
         .replace(/\{\{orderNumber\}\}/g, order.orderNumber)
         .replace(/\{\{customerName\}\}/g, order.customerName);
 
-      const statusSubject = smtpSettings?.orderStatusSubject || `[${storeName}] Order #${order.orderNumber} — ${emoji} ${status}`;
+      const statusSubject = smtpSettings?.orderStatusSubject || `[${storeName}] Order #${order.orderNumber} — ${status}`;
 
       fetch('/api/send-email', {
         method: 'POST',
