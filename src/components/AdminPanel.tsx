@@ -42,7 +42,7 @@ import {
  Server,
 } from'lucide-react';
 import { Product, Coupon, Category, DeliveryZone, ProductImage, ProductVariant, ProductVariantGroup } from'../types';
-import { getActiveEngine, simpleHash, hashPassword, dbService, saveProductImages, getProductImages, saveProductVariantGroups, getProductVariantGroups, saveProductVariants, getProductVariants } from '../db';
+import { getActiveEngine, hashPassword, dbService, saveProductImages, getProductImages, saveProductVariantGroups, getProductVariantGroups, saveProductVariants, getProductVariants } from '../db';
 
 
 export const AdminPanel: React.FC = () => {
@@ -631,16 +631,17 @@ const [brandPayFastLogo, setBrandPayFastLogo] = useState((paymentSettings as any
     const storedPass = liveSettings?.password || liveSettings?.passwordHash || adminSettings.password || adminSettings.passwordHash || '';
    const storedUser = liveSettings?.username || adminSettings.username || '';
    const newHash = await hashPassword(inputPass);
-   const oldHash = simpleHash(inputPass);
+   // simpleHash removed — only hashPassword() used.
+   // Checks: (1) secure hash match, (2) plain-text match (very old accounts)
    const passMatches =
      newHash === storedPass ||
-     oldHash === storedPass ||
      inputPass === storedPass;
 
    if (inputUser === storedUser && passMatches) {
      setLoginAttemptCount(0); setLockoutUntil(null); try { localStorage.removeItem(LOCKOUT_KEY); } catch {}
      setLoginSuccess('Access granted! Loading Store Admin...');
-     if (oldHash === storedPass || inputPass === storedPass) {
+     if (inputPass === storedPass) {
+       // Auto-upgrade plain-text stored password to secure hash
        await saveAdminSettings({ ...liveSettings, username: storedUser, password: newHash });
        try { localStorage.setItem('qf_adminSettings', JSON.stringify({ ...liveSettings, username: storedUser, password: newHash })); } catch {}
      }
