@@ -116,13 +116,16 @@
     }
   ],
   "functions": {
-    "api/payment.ts": {
-      "includeFiles": "lib/**"
+    "api/payment.js": {
+      "maxDuration": 30
     },
     "api/send-email.ts": {
       "maxDuration": 30
     },
     "api/verify-smtp.ts": {
+      "maxDuration": 30
+    },
+    "api/send-sms.ts": {
       "maxDuration": 30
     }
   }
