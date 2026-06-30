@@ -1,5 +1,5 @@
 {
-  "buildCommand": "vite build",
+  "buildCommand": "npm run build:vercel",
   "outputDirectory": "dist",
   "rewrites": [
     {
@@ -114,5 +114,16 @@
         }
       ]
     }
-  ]
+  ],
+  "functions": {
+    "api/payment.ts": {
+      "includeFiles": "lib/**"
+    },
+    "api/send-email.ts": {
+      "maxDuration": 30
+    },
+    "api/verify-smtp.ts": {
+      "maxDuration": 30
+    }
+  }
 }
