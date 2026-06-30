@@ -97,8 +97,11 @@ interface UserAuthModalProps {
   isOpen: boolean;
   onClose: () => void;
   defaultTab?: 'signin' | 'signup';
-  /** Open directly on the forgot-password tab (e.g. from guest email link). */
-  defaultView?: 'forgot';
+  /**
+   * 'forgot'       = open forgot-password tab (sends new OTP on submit)
+   * 'set-password' = guest first-time setup: skip to OTP entry (OTP already sent)
+   */
+  defaultView?: 'forgot' | 'set-password';
   /** Pre-fill the forgot-password email field. */
   defaultEmail?: string;
 }
@@ -106,7 +109,11 @@ interface UserAuthModalProps {
 export const UserAuthModal = ({ isOpen, onClose, defaultTab = 'signin', defaultView, defaultEmail }: UserAuthModalProps) => {
   const { loginUser, loginWithGoogle, registerUser, resetUserPassword, sendPasswordOtp, verifyPasswordOtp, sendRegistrationOtp, verifyRegistrationOtp, userProfile, logoutUser, isUserLoggedIn, updateUserProfile, adminSettings, orders, siteSettings, updateOrderStatus, smtpSettings, emailVerificationSettings, checkPhoneAvailability } = useApp();
   const toast = useToast();
-  const [tab, setTab] = useState<'signin' | 'signup' | 'profile' | 'forgot'>(isUserLoggedIn ? 'profile' : (defaultView === 'forgot' ? 'forgot' : defaultTab));
+  const [tab, setTab] = useState<'signin' | 'signup' | 'profile' | 'forgot'>(
+    // For set-password / forgot deep-links, always open on forgot tab regardless of login state
+    (defaultView === 'set-password' || defaultView === 'forgot') ? 'forgot' :
+    isUserLoggedIn ? 'profile' : defaultTab
+  );
   const [fpEmail, setFpEmail] = useState(defaultEmail || '');
   const [fpOtp, setFpOtp] = useState('');
   const [fpNewPass, setFpNewPass] = useState('');
@@ -123,10 +130,17 @@ export const UserAuthModal = ({ isOpen, onClose, defaultTab = 'signin', defaultV
   const [wrongOtpAttempts, setWrongOtpAttempts] = useState(0);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Deep-link: when modal opens with defaultView='forgot' (guest "Set My Password" link),
-  // jump straight to the forgot-password tab and pre-fill the email.
+  // Deep-link handler:
+  // - defaultView='set-password': guest clicked "Set My Password". OTP already sent.
+  //   Skip straight to OTP entry step (step='otp') with email pre-filled.
+  // - defaultView='forgot': regular forgot-password. Start at step='email'.
   useEffect(() => {
-    if (isOpen && defaultView === 'forgot') {
+    if (isOpen && defaultView === 'set-password') {
+      setTab('forgot');
+      setFpStep('otp');                                  // skip straight to OTP entry
+      setFpVerifiedEmail(defaultEmail || '');            // needed for verifyPasswordOtp()
+      if (defaultEmail) setFpEmail(defaultEmail);
+    } else if (isOpen && defaultView === 'forgot') {
       setTab('forgot');
       setFpStep('email');
       if (defaultEmail) setFpEmail(defaultEmail);
@@ -254,7 +268,11 @@ export const UserAuthModal = ({ isOpen, onClose, defaultTab = 'signin', defaultV
   const [editCity, setEditCity] = useState(userProfile?.city || '');
 
   React.useEffect(() => {
-    if (isUserLoggedIn) {
+    // When the modal is opened via a deep-link (set-password / forgot),
+    // do NOT redirect to the profile tab even if the user is logged in.
+    // The user needs to complete the password setup flow first.
+    const isDeepLink = defaultView === 'set-password' || defaultView === 'forgot';
+    if (isUserLoggedIn && !isDeepLink) {
       setTab('profile');
       setEditName(userProfile?.name || '');
       const parsed = splitDial(userProfile?.phone || '');
@@ -262,10 +280,11 @@ export const UserAuthModal = ({ isOpen, onClose, defaultTab = 'signin', defaultV
       setEditPhone(parsed.local);
       setEditAddress(userProfile?.address || '');
       setEditCity(userProfile?.city || '');
-    } else {
+    } else if (!isUserLoggedIn && !isDeepLink) {
       setTab(defaultTab);
     }
-  }, [isUserLoggedIn, defaultTab, userProfile]);
+    // If isDeepLink — do nothing; the deep-link useEffect manages the tab
+  }, [isUserLoggedIn, defaultTab, userProfile, defaultView]);
 
   const showPop = (type: 'success' | 'error', msg: string) => {
     setPopStatus({ type, msg });
@@ -905,8 +924,8 @@ export const UserAuthModal = ({ isOpen, onClose, defaultTab = 'signin', defaultV
             </>
           )}
 
-          {/* FORGOT PASSWORD PANEL */}
-          {!isUserLoggedIn && tab === 'forgot' && (
+          {/* FORGOT PASSWORD PANEL — also shown to logged-in guests setting password for first time */}
+          {tab === 'forgot' && (
             <div className="space-y-4">
               <div className="flex items-center gap-2 mb-2">
                 <button type="button" onClick={() => { setTab('signin'); setFpStep('email'); }} className="text-slate-400 hover:text-slate-600 cursor-pointer">
@@ -945,7 +964,7 @@ export const UserAuthModal = ({ isOpen, onClose, defaultTab = 'signin', defaultV
                 <form onSubmit={handleForgotVerifyOtp} className="space-y-4">
                   <div className="bg-amber-50 border border-amber-100 rounded-xl p-3 text-[11px] text-amber-700">
                     <p className="font-bold mb-0.5">Check your inbox</p>
-                    <p>We sent a 6-digit OTP to <span className="font-mono font-bold">{fpVerifiedEmail}</span>. Enter it below.</p>
+                    <p>{defaultView === 'set-password' ? <>Enter the code we sent to <span className="font-mono font-bold">{fpVerifiedEmail}</span> in your welcome email.</> : <>We sent a 6-digit OTP to <span className="font-mono font-bold">{fpVerifiedEmail}</span>. Enter it below.</>}</p>
                   </div>
                   <div>
                     <label htmlFor="auth-forgot-otp" className="block text-[10px] font-bold uppercase text-slate-500 mb-1.5">6-Digit OTP</label>

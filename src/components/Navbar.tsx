@@ -28,7 +28,7 @@ export const Navbar = ({
   const { siteSettings, cart, isAdminLoggedIn, isUserLoggedIn, userProfile, products, formatPrice } = useApp();
   const [searchOpen, setSearchOpen] = useState(false);
   const [authModalOpen, setAuthModalOpen] = useState(false);
-  const [authInitialView, setAuthInitialView] = useState<'forgot' | undefined>(undefined);
+  const [authInitialView, setAuthInitialView] = useState<'forgot' | 'set-password' | undefined>(undefined);
   const [authInitialEmail, setAuthInitialEmail] = useState('');
   const [authTab, setAuthTab] = useState<'signin' | 'signup'>('signin');
   const [searchDropdownOpen, setSearchDropdownOpen] = useState(false);
@@ -36,17 +36,21 @@ export const Navbar = ({
   const mobileSearchWrapperRef = useRef<HTMLDivElement>(null);
 
   // Deep-link handler: guest clicks "Set My Password" in their welcome email.
-  // URL: /?action=forgot-password&email=user%40example.com
-  // Opens the auth modal directly on the forgot-password tab with email pre-filled.
+  // ?action=set-password  → guest first-time password setup (OTP already sent, skip to OTP step)
+  // ?action=forgot-password → regular forgot-password (enter email, get new OTP)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const action = params.get('action');
     const email  = params.get('email');
-    if (action === 'forgot-password') {
+    if (action === 'set-password') {
+      setAuthInitialView('set-password');  // special: skip to OTP step
+      setAuthInitialEmail(email || '');
+      setAuthModalOpen(true);
+      window.history.replaceState({}, '', window.location.pathname);
+    } else if (action === 'forgot-password') {
       setAuthInitialView('forgot');
       setAuthInitialEmail(email || '');
       setAuthModalOpen(true);
-      // Clean the URL so refreshing doesn't re-open the modal
       window.history.replaceState({}, '', window.location.pathname);
     }
   }, []);
